@@ -30,6 +30,9 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
+-- Add entry column for copy trading (distinguishes opens from closes)
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS entry VARCHAR(32);
+
 CREATE TABLE IF NOT EXISTS orders (
   ticket BIGINT PRIMARY KEY,
   account_id BIGINT NOT NULL,
@@ -108,3 +111,57 @@ CREATE INDEX IF NOT EXISTS idx_orders_order_time ON orders(order_time);
 CREATE INDEX IF NOT EXISTS idx_snapshots_account_id ON account_snapshots(account_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON account_snapshots(snapshot_time);
 CREATE INDEX IF NOT EXISTS idx_snapshots_account_time ON account_snapshots(account_id, snapshot_time DESC);
+
+-- Copy Trading Tables
+
+CREATE TABLE IF NOT EXISTS copy_configs (
+  id SERIAL PRIMARY KEY,
+  source_account_id BIGINT NOT NULL,
+  dest_account_id BIGINT NOT NULL,
+  volume_multiplier DECIMAL(8,4) DEFAULT 1.0,
+  enabled BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(source_account_id, dest_account_id)
+);
+
+CREATE TABLE IF NOT EXISTS copy_signals (
+  id SERIAL PRIMARY KEY,
+  config_id INTEGER REFERENCES copy_configs(id),
+  source_account_id BIGINT NOT NULL,
+  dest_account_id BIGINT NOT NULL,
+  signal_type VARCHAR(16) NOT NULL, -- open, close, modify
+  symbol VARCHAR(32),
+  direction VARCHAR(8), -- BUY, SELL
+  volume DECIMAL(10,2),
+  source_position_ticket BIGINT,
+  source_deal_ticket BIGINT,
+  sl DECIMAL(16,5),
+  tp DECIMAL(16,5),
+  status VARCHAR(16) DEFAULT 'pending', -- pending, sent, filled, failed
+  dest_deal_ticket BIGINT,
+  dest_position_ticket BIGINT,
+  dest_price DECIMAL(16,5),
+  error_message TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  executed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_signals_config ON copy_signals(config_id);
+CREATE INDEX IF NOT EXISTS idx_copy_signals_status ON copy_signals(status);
+CREATE INDEX IF NOT EXISTS idx_copy_signals_created ON copy_signals(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS copy_position_map (
+  id SERIAL PRIMARY KEY,
+  config_id INTEGER REFERENCES copy_configs(id),
+  source_position_ticket BIGINT NOT NULL,
+  dest_position_ticket BIGINT NOT NULL,
+  symbol VARCHAR(32),
+  is_open BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  closed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_position_map_config ON copy_position_map(config_id);
+CREATE INDEX IF NOT EXISTS idx_copy_position_map_source ON copy_position_map(source_position_ticket);
+CREATE INDEX IF NOT EXISTS idx_copy_position_map_open ON copy_position_map(is_open);

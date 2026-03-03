@@ -87,6 +87,10 @@ export class RabbitMQPublisher {
     this.publish('mt5.open_orders.snapshot', data);
   }
 
+  publishPositionModifyEvent(data: any): void {
+    this.publish('mt5.position.modify', data);
+  }
+
   async disconnect(): Promise<void> {
     try {
       await this.channel?.close();

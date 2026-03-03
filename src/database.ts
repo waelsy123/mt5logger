@@ -79,11 +79,12 @@ export class DatabaseService {
     try {
       const dealTime = this.parseEATime(payload.time);
       const query = `
-        INSERT INTO deals (ticket, account_id, order_ticket, position_ticket, symbol, type, volume, price, profit, commission, swap, sl, tp, magic_number, comment, deal_time, raw_data)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        INSERT INTO deals (ticket, account_id, order_ticket, position_ticket, symbol, type, volume, price, profit, commission, swap, sl, tp, magic_number, comment, entry, deal_time, raw_data)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         ON CONFLICT (ticket) DO UPDATE SET
           sl = EXCLUDED.sl,
           tp = EXCLUDED.tp,
+          entry = EXCLUDED.entry,
           raw_data = EXCLUDED.raw_data
       `;
       const values = [
@@ -102,6 +103,7 @@ export class DatabaseService {
         payload.tp || 0,
         payload.magic_number || 0,
         payload.comment || null,
+        payload.entry || null,
         dealTime,
         JSON.stringify(payload),
       ];
@@ -414,6 +416,202 @@ export class DatabaseService {
       console.error('[Database] Failed to get account stats:', error instanceof Error ? error.message : error);
       throw error;
     }
+  }
+
+  // --- Copy Config CRUD ---
+
+  async getCopyConfigs(): Promise<any[]> {
+    const result = await this.pool.query('SELECT * FROM copy_configs ORDER BY created_at DESC');
+    return result.rows;
+  }
+
+  async getCopyConfig(id: number): Promise<any | null> {
+    const result = await this.pool.query('SELECT * FROM copy_configs WHERE id = $1', [id]);
+    return result.rows[0] || null;
+  }
+
+  async createCopyConfig(sourceAccountId: number, destAccountId: number, volumeMultiplier: number = 1.0): Promise<any> {
+    const result = await this.pool.query(
+      `INSERT INTO copy_configs (source_account_id, dest_account_id, volume_multiplier)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [sourceAccountId, destAccountId, volumeMultiplier]
+    );
+    return result.rows[0];
+  }
+
+  async updateCopyConfig(id: number, updates: { volume_multiplier?: number; enabled?: boolean }): Promise<any | null> {
+    const fields: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    if (updates.volume_multiplier !== undefined) {
+      fields.push(`volume_multiplier = $${paramIdx++}`);
+      values.push(updates.volume_multiplier);
+    }
+    if (updates.enabled !== undefined) {
+      fields.push(`enabled = $${paramIdx++}`);
+      values.push(updates.enabled);
+    }
+
+    values.push(id);
+    const result = await this.pool.query(
+      `UPDATE copy_configs SET ${fields.join(', ')} WHERE id = $${paramIdx} RETURNING *`,
+      values
+    );
+    return result.rows[0] || null;
+  }
+
+  async deleteCopyConfig(id: number): Promise<boolean> {
+    const result = await this.pool.query('DELETE FROM copy_configs WHERE id = $1', [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getActiveCopyConfigsBySource(sourceAccountId: number): Promise<any[]> {
+    const result = await this.pool.query(
+      'SELECT * FROM copy_configs WHERE source_account_id = $1 AND enabled = true',
+      [sourceAccountId]
+    );
+    return result.rows;
+  }
+
+  // --- Copy Signals ---
+
+  async createCopySignal(signal: {
+    config_id: number;
+    source_account_id: number;
+    dest_account_id: number;
+    signal_type: string;
+    symbol?: string;
+    direction?: string;
+    volume?: number;
+    source_position_ticket?: number;
+    source_deal_ticket?: number;
+    sl?: number;
+    tp?: number;
+  }): Promise<any> {
+    const result = await this.pool.query(
+      `INSERT INTO copy_signals (config_id, source_account_id, dest_account_id, signal_type, symbol, direction, volume, source_position_ticket, source_deal_ticket, sl, tp)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [
+        signal.config_id,
+        signal.source_account_id,
+        signal.dest_account_id,
+        signal.signal_type,
+        signal.symbol || null,
+        signal.direction || null,
+        signal.volume || null,
+        signal.source_position_ticket || null,
+        signal.source_deal_ticket || null,
+        signal.sl || null,
+        signal.tp || null,
+      ]
+    );
+    return result.rows[0];
+  }
+
+  async updateCopySignalResult(id: number, result: {
+    status: string;
+    dest_deal_ticket?: number;
+    dest_position_ticket?: number;
+    dest_price?: number;
+    error_message?: string;
+  }): Promise<any | null> {
+    const res = await this.pool.query(
+      `UPDATE copy_signals SET status = $1, dest_deal_ticket = $2, dest_position_ticket = $3, dest_price = $4, error_message = $5, executed_at = CURRENT_TIMESTAMP
+       WHERE id = $6 RETURNING *`,
+      [
+        result.status,
+        result.dest_deal_ticket || null,
+        result.dest_position_ticket || null,
+        result.dest_price || null,
+        result.error_message || null,
+        id,
+      ]
+    );
+    return res.rows[0] || null;
+  }
+
+  async getCopySignals(filters: { limit?: number; config_id?: number; status?: string } = {}): Promise<any[]> {
+    const conditions: string[] = [];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    if (filters.config_id) {
+      conditions.push(`config_id = $${paramIdx++}`);
+      values.push(filters.config_id);
+    }
+    if (filters.status) {
+      conditions.push(`status = $${paramIdx++}`);
+      values.push(filters.status);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = filters.limit || 50;
+    values.push(limit);
+
+    const result = await this.pool.query(
+      `SELECT * FROM copy_signals ${where} ORDER BY created_at DESC LIMIT $${paramIdx}`,
+      values
+    );
+    return result.rows;
+  }
+
+  async getCopySignal(id: number): Promise<any | null> {
+    const result = await this.pool.query('SELECT * FROM copy_signals WHERE id = $1', [id]);
+    return result.rows[0] || null;
+  }
+
+  // --- Position Mapping ---
+
+  async createPositionMapping(mapping: {
+    config_id: number;
+    source_position_ticket: number;
+    dest_position_ticket: number;
+    symbol?: string;
+  }): Promise<any> {
+    const result = await this.pool.query(
+      `INSERT INTO copy_position_map (config_id, source_position_ticket, dest_position_ticket, symbol)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [mapping.config_id, mapping.source_position_ticket, mapping.dest_position_ticket, mapping.symbol || null]
+    );
+    return result.rows[0];
+  }
+
+  async getDestPositionTicket(configId: number, sourceTicket: number): Promise<number | null> {
+    const result = await this.pool.query(
+      'SELECT dest_position_ticket FROM copy_position_map WHERE config_id = $1 AND source_position_ticket = $2 AND is_open = true',
+      [configId, sourceTicket]
+    );
+    return result.rows[0]?.dest_position_ticket || null;
+  }
+
+  async closePositionMapping(configId: number, sourceTicket: number): Promise<void> {
+    await this.pool.query(
+      'UPDATE copy_position_map SET is_open = false, closed_at = CURRENT_TIMESTAMP WHERE config_id = $1 AND source_position_ticket = $2 AND is_open = true',
+      [configId, sourceTicket]
+    );
+  }
+
+  async getPositionMappings(filters: { config_id?: number; is_open?: boolean } = {}): Promise<any[]> {
+    const conditions: string[] = [];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    if (filters.config_id) {
+      conditions.push(`config_id = $${paramIdx++}`);
+      values.push(filters.config_id);
+    }
+    if (filters.is_open !== undefined) {
+      conditions.push(`is_open = $${paramIdx++}`);
+      values.push(filters.is_open);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await this.pool.query(
+      `SELECT * FROM copy_position_map ${where} ORDER BY created_at DESC`,
+      values
+    );
+    return result.rows;
   }
 
   async disconnect(): Promise<void> {
