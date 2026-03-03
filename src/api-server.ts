@@ -9,6 +9,7 @@ export class ApiServer {
   private app: Express;
   private server: HTTPServer | null = null;
   private wss: WebSocketServer | null = null;
+  private pendingCommands: Map<number, Set<string>> = new Map();
 
   constructor(
     private port: number,
@@ -60,6 +61,7 @@ export class ApiServer {
         }
 
         const eventType = payload.event_type;
+        const accountId = payload.account_id ? Number(payload.account_id) : 0;
 
         if (eventType === 'deal') {
           this.rabbitmqPublisher.publishDealEvent(payload);
@@ -69,12 +71,35 @@ export class ApiServer {
           this.rabbitmqPublisher.publishAccountEvent(payload);
         } else if (eventType === 'positions') {
           this.rabbitmqPublisher.publishPositionsEvent(payload);
+        } else if (eventType === 'open_orders') {
+          this.rabbitmqPublisher.publishOpenOrdersEvent(payload);
         } else {
           res.status(400).json({ error: `Unknown event_type: ${eventType}` });
           return;
         }
 
         console.log(`[API] Webhook received: ${eventType} event`);
+
+        // Reactive commands: trade events trigger immediate data requests
+        if (eventType === 'deal' || eventType === 'order') {
+          const commands = ['send_positions', 'send_account', 'send_open_orders'];
+          console.log(`[API] Trade event — requesting data refresh from EA`);
+          res.json({ status: 'received', commands });
+          return;
+        }
+
+        // Data events: only return queued on-demand commands (prevents infinite loop)
+        if (accountId && this.pendingCommands.has(accountId)) {
+          const queued = this.pendingCommands.get(accountId)!;
+          if (queued.size > 0) {
+            const commands = Array.from(queued);
+            this.pendingCommands.delete(accountId);
+            console.log(`[API] Delivering queued commands for account ${accountId}: ${commands.join(', ')}`);
+            res.json({ status: 'received', commands });
+            return;
+          }
+        }
+
         res.json({ status: 'received' });
       } catch (error) {
         console.error('[API] Webhook error:', error instanceof Error ? error.message : error);
@@ -177,6 +202,30 @@ export class ApiServer {
       }
     });
 
+    // Get open orders for an account
+    this.app.get('/accounts/:id/open-orders', async (req: Request, res: Response) => {
+      try {
+        const accountId = parseInt(req.params.id as string, 10);
+        const orders = await this.databaseService.getOpenOrders(accountId);
+        res.json({ success: true, count: orders.length, orders });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Failed to fetch open orders' });
+      }
+    });
+
+    // Request refresh — queues commands for the EA to pick up on next timer tick
+    this.app.post('/accounts/:id/request-refresh', async (req: Request, res: Response) => {
+      try {
+        const accountId = parseInt(req.params.id as string, 10);
+        const commands = new Set(['send_positions', 'send_account', 'send_open_orders']);
+        this.pendingCommands.set(accountId, commands);
+        console.log(`[API] Queued refresh commands for account ${accountId}`);
+        res.json({ success: true, message: 'Refresh commands queued for next EA tick' });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Failed to queue refresh' });
+      }
+    });
+
     // 404 handler
     this.app.use((_req: Request, res: Response) => {
       res.status(404).json({
@@ -189,6 +238,8 @@ export class ApiServer {
           'GET /accounts/:id/deals?limit=100',
           'GET /accounts/:id/positions',
           'GET /accounts/:id/orders?limit=100',
+          'GET /accounts/:id/open-orders',
+          'POST /accounts/:id/request-refresh',
           'GET /accounts/:id/snapshots?since=<iso>',
           'GET /accounts/:id/daily-pnl?days=30',
           'GET /accounts/:id/stats',

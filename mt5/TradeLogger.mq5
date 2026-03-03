@@ -96,8 +96,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       string json = BuildDealPayload(deal_ticket);
       Print("TradeLogger: New deal #", deal_ticket, " — sending webhook");
 
-      if(SendWebhook(json))
+      string response = SendWebhook(json);
+      if(response != "")
+      {
          AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
+         ProcessServerCommands(response);
+      }
    }
    else if(trans.type == TRADE_TRANSACTION_ORDER_ADD)
    {
@@ -109,8 +113,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       string json = BuildOrderPayload(order_ticket, trans);
       Print("TradeLogger: New order #", order_ticket, " — sending webhook");
 
-      if(SendWebhook(json))
+      string response = SendWebhook(json);
+      if(response != "")
+      {
          AddSentTicket(g_sent_order_tickets, g_sent_order_count, order_ticket);
+         ProcessServerCommands(response);
+      }
    }
 }
 
@@ -141,7 +149,8 @@ void OnTimer()
          string json = BuildDealPayload(deal_ticket);
          Print("TradeLogger: [Timer] Missed deal #", deal_ticket, " — sending webhook");
 
-         if(SendWebhook(json))
+         string resp = SendWebhook(json);
+         if(resp != "")
             AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
       }
    }
@@ -150,10 +159,13 @@ void OnTimer()
 
    // --- Account snapshot: balance, equity, daily PnL ---
    string account_json = BuildAccountPayload();
-   SendWebhook(account_json);
+   string account_response = SendWebhook(account_json);
 
    // --- Open positions snapshot ---
    SendPositionsPayload();
+
+   // --- Process any queued on-demand commands from the server ---
+   ProcessServerCommands(account_response);
 }
 
 //+------------------------------------------------------------------+
@@ -378,9 +390,105 @@ void SendPositionsPayload()
 }
 
 //+------------------------------------------------------------------+
+//| Send open orders snapshot                                        |
+//+------------------------------------------------------------------+
+void SendOpenOrdersPayload()
+{
+   int total = OrdersTotal();
+
+   string json = "{"
+      + "\"event_type\":\"open_orders\","
+      + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+      + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
+      + "\"ea_version\":\"1.03\","
+      + "\"orders\":[";
+
+   bool first = true;
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(InpMagicNumber != 0 && OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+         continue;
+
+      if(!first) json += ",";
+      first = false;
+
+      string symbol     = OrderGetString(ORDER_SYMBOL);
+      long   ord_type   = OrderGetInteger(ORDER_TYPE);
+      double volume     = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      double price      = OrderGetDouble(ORDER_PRICE_OPEN);
+      double sl         = OrderGetDouble(ORDER_SL);
+      double tp         = OrderGetDouble(ORDER_TP);
+      datetime ord_time = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      long   magic      = OrderGetInteger(ORDER_MAGIC);
+      string comment    = OrderGetString(ORDER_COMMENT);
+
+      StringReplace(comment, "\\", "\\\\");
+      StringReplace(comment, "\"", "\\\"");
+
+      json += "{"
+         + "\"ticket\":" + IntegerToString(ticket) + ","
+         + "\"symbol\":\"" + symbol + "\","
+         + "\"type\":\"" + EnumToString((ENUM_ORDER_TYPE)ord_type) + "\","
+         + "\"volume\":" + DoubleToString(volume, 2) + ","
+         + "\"price\":" + DoubleToString(price, 5) + ","
+         + "\"sl\":" + DoubleToString(sl, 5) + ","
+         + "\"tp\":" + DoubleToString(tp, 5) + ","
+         + "\"time\":\"" + TimeToString(ord_time, TIME_DATE | TIME_SECONDS) + "\","
+         + "\"magic_number\":" + IntegerToString(magic) + ","
+         + "\"comment\":\"" + comment + "\""
+         + "}";
+   }
+
+   json += "]}";
+
+   SendWebhook(json);
+   Print("TradeLogger: Sent open orders snapshot (", total, " orders)");
+}
+
+//+------------------------------------------------------------------+
+//| Check if server response contains a command                      |
+//+------------------------------------------------------------------+
+bool ResponseHasCommand(string response, string command)
+{
+   return StringFind(response, command) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| Process server commands from webhook response                    |
+//+------------------------------------------------------------------+
+void ProcessServerCommands(string response)
+{
+   if(response == "")
+      return;
+
+   if(ResponseHasCommand(response, "send_positions"))
+   {
+      Print("TradeLogger: Server requested positions snapshot");
+      SendPositionsPayload();
+   }
+
+   if(ResponseHasCommand(response, "send_account"))
+   {
+      Print("TradeLogger: Server requested account snapshot");
+      string account_json = BuildAccountPayload();
+      SendWebhook(account_json);
+   }
+
+   if(ResponseHasCommand(response, "send_open_orders"))
+   {
+      Print("TradeLogger: Server requested open orders snapshot");
+      SendOpenOrdersPayload();
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Send webhook via HTTP POST                                       |
 //+------------------------------------------------------------------+
-bool SendWebhook(string json)
+string SendWebhook(string json)
 {
    char   post_data[];
    char   result_data[];
@@ -409,22 +517,23 @@ bool SendWebhook(string json)
       int error = GetLastError();
       Print("TradeLogger: WebRequest failed. Error=", error);
       Print("TradeLogger: Ensure URL is allowed in Tools > Options > Expert Advisors");
-      return false;
+      return "";
    }
+
+   string response_body = CharArrayToString(result_data, 0, WHOLE_ARRAY, CP_UTF8);
 
    if(response_code == 200)
    {
       Print("TradeLogger: Webhook sent successfully");
-      return true;
+      return response_body;
    }
 
-   string response_body = CharArrayToString(result_data, 0, WHOLE_ARRAY, CP_UTF8);
    Print("TradeLogger: Webhook returned HTTP ", response_code, ": ", response_body);
 
    if(response_code == 401)
       Alert("TradeLogger: API key rejected by server! Check InpApiKey.");
 
-   return false;
+   return "";
 }
 
 //+------------------------------------------------------------------+
