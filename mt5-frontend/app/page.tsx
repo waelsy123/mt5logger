@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 
 interface Account {
   account_id: string;
@@ -168,6 +169,15 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-3">
+              <Link
+                href="/copy-trading"
+                className="flex items-center gap-2 px-4 py-2 rounded-lg ring-1 bg-orange-500/10 text-orange-400 ring-orange-500/30 hover:bg-orange-500/20 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+                <span className="text-sm font-medium">Copy Trading</span>
+              </Link>
               <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ring-1 ${
                 wsConnected
                   ? 'bg-green-500/10 text-green-400 ring-green-500/30'

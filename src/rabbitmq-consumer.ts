@@ -90,6 +90,7 @@ export class RabbitMQConsumer {
         if (routingKey === 'mt5.deal.new') {
           await this.databaseService.storeDeal(data);
           this.apiServer.broadcastEvent('deal', data);
+          await this.generateCopySignals(data, 'deal');
         } else if (routingKey === 'mt5.order.new') {
           await this.databaseService.storeOrder(data);
           this.apiServer.broadcastEvent('order', data);
@@ -102,6 +103,9 @@ export class RabbitMQConsumer {
         } else if (routingKey === 'mt5.open_orders.snapshot') {
           await this.databaseService.storeOpenOrders(data.account_id, data.orders || []);
           this.apiServer.broadcastEvent('open_orders', data);
+        } else if (routingKey === 'mt5.position.modify') {
+          this.apiServer.broadcastEvent('position_modify', data);
+          await this.generateCopySignals(data, 'position_modify');
         } else {
           console.warn(`[Consumer] Unknown routing key: ${routingKey}`);
         }
@@ -115,6 +119,108 @@ export class RabbitMQConsumer {
     });
 
     console.log('[RabbitMQ Consumer] Now listening for messages');
+  }
+
+  private async generateCopySignals(data: any, eventType: 'deal' | 'position_modify'): Promise<void> {
+    try {
+      const sourceAccountId = data.account_id;
+      if (!sourceAccountId) return;
+
+      const configs = await this.databaseService.getActiveCopyConfigsBySource(sourceAccountId);
+      if (configs.length === 0) return;
+
+      console.log(`[CopyTrading] Found ${configs.length} active config(s) for source account ${sourceAccountId}`);
+
+      for (const config of configs) {
+        try {
+          if (eventType === 'deal') {
+            await this.generateDealCopySignal(data, config);
+          } else if (eventType === 'position_modify') {
+            await this.generateModifyCopySignal(data, config);
+          }
+        } catch (err) {
+          console.error(`[CopyTrading] Error generating signal for config ${config.id}:`, err instanceof Error ? err.message : err);
+        }
+      }
+    } catch (error) {
+      console.error('[CopyTrading] Error in generateCopySignals:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  private async generateDealCopySignal(data: any, config: any): Promise<void> {
+    const entry = data.entry;
+    if (!entry) return;
+
+    // Determine direction from deal type
+    const dealType = data.type || '';
+    let direction: string | undefined;
+    if (dealType.includes('BUY')) direction = 'BUY';
+    else if (dealType.includes('SELL')) direction = 'SELL';
+
+    if (entry === 'DEAL_ENTRY_IN') {
+      // Opening trade — create open signal
+      const volume = parseFloat(data.volume || 0) * parseFloat(config.volume_multiplier);
+      const signal = await this.databaseService.createCopySignal({
+        config_id: config.id,
+        source_account_id: config.source_account_id,
+        dest_account_id: config.dest_account_id,
+        signal_type: 'open',
+        symbol: data.symbol,
+        direction,
+        volume: Math.round(volume * 100) / 100,
+        source_position_ticket: data.position_ticket,
+        source_deal_ticket: data.ticket,
+        sl: data.sl || 0,
+        tp: data.tp || 0,
+      });
+      console.log(`[CopyTrading] Created OPEN signal #${signal.id} for config ${config.id}`);
+      this.apiServer.sendToExecutor(signal);
+    } else if (entry === 'DEAL_ENTRY_OUT' || entry === 'DEAL_ENTRY_INOUT') {
+      // Closing trade — look up dest position ticket from map
+      const destTicket = await this.databaseService.getDestPositionTicket(config.id, data.position_ticket);
+      if (!destTicket) {
+        console.warn(`[CopyTrading] No position mapping found for source ticket ${data.position_ticket} in config ${config.id}`);
+        return;
+      }
+
+      const signal = await this.databaseService.createCopySignal({
+        config_id: config.id,
+        source_account_id: config.source_account_id,
+        dest_account_id: config.dest_account_id,
+        signal_type: 'close',
+        symbol: data.symbol,
+        direction,
+        source_position_ticket: data.position_ticket,
+        source_deal_ticket: data.ticket,
+      });
+      // Embed dest_position_ticket for the executor
+      (signal as any).dest_position_ticket = destTicket;
+      console.log(`[CopyTrading] Created CLOSE signal #${signal.id} for config ${config.id} (dest ticket: ${destTicket})`);
+      this.apiServer.sendToExecutor(signal);
+    }
+  }
+
+  private async generateModifyCopySignal(data: any, config: any): Promise<void> {
+    const destTicket = await this.databaseService.getDestPositionTicket(config.id, data.position_ticket);
+    if (!destTicket) {
+      console.warn(`[CopyTrading] No position mapping found for source ticket ${data.position_ticket} in config ${config.id}`);
+      return;
+    }
+
+    const signal = await this.databaseService.createCopySignal({
+      config_id: config.id,
+      source_account_id: config.source_account_id,
+      dest_account_id: config.dest_account_id,
+      signal_type: 'modify',
+      symbol: data.symbol,
+      source_position_ticket: data.position_ticket,
+      sl: data.sl || 0,
+      tp: data.tp || 0,
+    });
+    // Embed dest_position_ticket for the executor
+    (signal as any).dest_position_ticket = destTicket;
+    console.log(`[CopyTrading] Created MODIFY signal #${signal.id} for config ${config.id} (dest ticket: ${destTicket})`);
+    this.apiServer.sendToExecutor(signal);
   }
 
   private setupErrorHandlers(): void {

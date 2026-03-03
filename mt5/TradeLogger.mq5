@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright "waelalmattar"
 #property link      "https://www.mql5.com"
-#property version   "1.03"
+#property version   "1.04"
 #property strict
 
 //--- User Inputs
@@ -119,6 +119,44 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          AddSentTicket(g_sent_order_tickets, g_sent_order_count, order_ticket);
          ProcessServerCommands(response);
       }
+   }
+   else if(trans.type == TRADE_TRANSACTION_POSITION)
+   {
+      // SL/TP modification on an existing position
+      ulong pos_ticket = trans.position;
+      if(pos_ticket == 0)
+         return;
+
+      if(!PositionSelectByTicket(pos_ticket))
+         return;
+
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      if(InpMagicNumber != 0 && magic != InpMagicNumber)
+         return;
+
+      string symbol   = PositionGetString(POSITION_SYMBOL);
+      long   pos_type = PositionGetInteger(POSITION_TYPE);
+      double sl       = PositionGetDouble(POSITION_SL);
+      double tp       = PositionGetDouble(POSITION_TP);
+
+      string type_str = (pos_type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+      string json = "{"
+         + "\"event_type\":\"position_modify\","
+         + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+         + "\"position_ticket\":" + IntegerToString(pos_ticket) + ","
+         + "\"symbol\":\"" + symbol + "\","
+         + "\"type\":\"" + type_str + "\","
+         + "\"sl\":" + DoubleToString(sl, 5) + ","
+         + "\"tp\":" + DoubleToString(tp, 5) + ","
+         + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
+         + "\"ea_version\":\"1.04\""
+         + "}";
+
+      Print("TradeLogger: Position #", pos_ticket, " modified (SL/TP) — sending webhook");
+      string response = SendWebhook(json);
+      if(response != "")
+         ProcessServerCommands(response);
    }
 }
 
@@ -229,7 +267,7 @@ string BuildAccountPayload()
       + "\"unrealized_pnl\":" + DoubleToString(unrealized, 2) + ","
       + "\"currency\":\"" + currency + "\","
       + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.03\""
+      + "\"ea_version\":\"1.04\""
       + "}";
 
    return json;
@@ -251,6 +289,7 @@ string BuildDealPayload(ulong deal_ticket)
    string comment    = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
    long   order      = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
    long   position   = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
+   long   entry      = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
    datetime time     = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
 
    // Get SL/TP from the open position (if it still exists)
@@ -282,9 +321,10 @@ string BuildDealPayload(ulong deal_ticket)
       + "\"sl\":" + DoubleToString(sl, 5) + ","
       + "\"tp\":" + DoubleToString(tp, 5) + ","
       + "\"magic_number\":" + IntegerToString(magic) + ","
+      + "\"entry\":\"" + EnumToString((ENUM_DEAL_ENTRY)entry) + "\","
       + "\"comment\":\"" + comment + "\","
       + "\"time\":\"" + TimeToString(time, TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.03\""
+      + "\"ea_version\":\"1.04\""
       + "}";
 
    return json;
@@ -320,7 +360,7 @@ string BuildOrderPayload(ulong order_ticket, const MqlTradeTransaction &trans)
       + "\"magic_number\":0,"
       + "\"comment\":\"\","
       + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.03\""
+      + "\"ea_version\":\"1.04\""
       + "}";
 
    return json;

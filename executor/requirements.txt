@@ -1,0 +1,2 @@
+mt5linux>=0.0.15
+websocket-client>=1.6.0
