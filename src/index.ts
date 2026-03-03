@@ -28,9 +28,13 @@ app.post("/webhook", async (c) => {
   try {
     const payload = await c.req.json();
 
-    if (!payload.ticket || !payload.event_type || !payload.symbol) {
+    if (!payload.event_type) {
+      return c.json({ error: "Missing required field: event_type" }, 400);
+    }
+
+    if (payload.event_type !== "account" && (!payload.ticket || !payload.symbol)) {
       return c.json(
-        { error: "Missing required fields: ticket, event_type, symbol" },
+        { error: "Missing required fields: ticket, symbol" },
         400
       );
     }

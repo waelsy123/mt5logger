@@ -1,9 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                  TradeLogger.mq5 |
-//|                                              MT5 Trade Logger EA |
+//|                                                     waelalmattar |
+//|                                             https://www.mql5.com |
 //|                                                                  |
 //| Monitors all trades and orders on the account and sends them     |
-//| as HTTP webhooks to your logging service.                        |
+//| as HTTP webhooks to your logging service. Also logs account      |
+//| balance, equity, and daily PnL on each timer tick.               |
 //|                                                                  |
 //| SETUP:                                                           |
 //| 1. Tools > Options > Expert Advisors                             |
@@ -13,8 +15,9 @@
 //| 3. Set WebhookUrl and ApiKey in the Inputs tab                   |
 //| 4. Enable "Allow Algo Trading" in MT5 toolbar                    |
 //+------------------------------------------------------------------+
-#property copyright "MT5 Trade Logger"
-#property version   "1.00"
+#property copyright "waelalmattar"
+#property link      "https://www.mql5.com"
+#property version   "1.01"
 #property strict
 
 //--- User Inputs
@@ -112,37 +115,109 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 }
 
 //+------------------------------------------------------------------+
-//| Timer handler — fallback polling for missed events               |
+//| Timer handler — fallback polling + account snapshot              |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
    datetime now = TimeCurrent();
 
-   if(!HistorySelect(g_last_history_check, now))
-      return;
-
-   int total_deals = HistoryDealsTotal();
-   for(int i = 0; i < total_deals; i++)
+   // --- Fallback: check for missed deals ---
+   if(HistorySelect(g_last_history_check, now))
    {
-      ulong deal_ticket = HistoryDealGetTicket(i);
-      if(deal_ticket == 0)
-         continue;
+      int total_deals = HistoryDealsTotal();
+      for(int i = 0; i < total_deals; i++)
+      {
+         ulong deal_ticket = HistoryDealGetTicket(i);
+         if(deal_ticket == 0)
+            continue;
 
-      long magic = HistoryDealGetInteger(deal_ticket, DEAL_MAGIC);
-      if(InpMagicNumber != 0 && magic != InpMagicNumber)
-         continue;
+         long magic = HistoryDealGetInteger(deal_ticket, DEAL_MAGIC);
+         if(InpMagicNumber != 0 && magic != InpMagicNumber)
+            continue;
 
-      if(IsTicketSent(g_sent_deal_tickets, g_sent_deal_count, deal_ticket))
-         continue;
+         if(IsTicketSent(g_sent_deal_tickets, g_sent_deal_count, deal_ticket))
+            continue;
 
-      string json = BuildDealPayload(deal_ticket);
-      Print("TradeLogger: [Timer] Missed deal #", deal_ticket, " — sending webhook");
+         string json = BuildDealPayload(deal_ticket);
+         Print("TradeLogger: [Timer] Missed deal #", deal_ticket, " — sending webhook");
 
-      if(SendWebhook(json))
-         AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
+         if(SendWebhook(json))
+            AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
+      }
    }
 
    g_last_history_check = now;
+
+   // --- Account snapshot: balance, equity, daily PnL ---
+   string account_json = BuildAccountPayload();
+   SendWebhook(account_json);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate daily realized PnL from today's closed deals           |
+//+------------------------------------------------------------------+
+double CalculateDailyPnL()
+{
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+   datetime day_start = StructToTime(dt);
+
+   double daily_pnl = 0.0;
+
+   if(!HistorySelect(day_start, TimeCurrent()))
+      return 0.0;
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      // Only count closing deals (DEAL_ENTRY_OUT) and in/out deals
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+      {
+         daily_pnl += HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(ticket, DEAL_COMMISSION)
+                    + HistoryDealGetDouble(ticket, DEAL_SWAP);
+      }
+   }
+
+   return daily_pnl;
+}
+
+//+------------------------------------------------------------------+
+//| Build JSON payload for account snapshot                          |
+//+------------------------------------------------------------------+
+string BuildAccountPayload()
+{
+   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
+   double margin     = AccountInfoDouble(ACCOUNT_MARGIN);
+   double free_margin= AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double daily_pnl  = CalculateDailyPnL();
+   double unrealized = equity - balance;
+   string currency   = AccountInfoString(ACCOUNT_CURRENCY);
+
+   string json = "{"
+      + "\"event_type\":\"account\","
+      + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+      + "\"balance\":" + DoubleToString(balance, 2) + ","
+      + "\"equity\":" + DoubleToString(equity, 2) + ","
+      + "\"margin\":" + DoubleToString(margin, 2) + ","
+      + "\"free_margin\":" + DoubleToString(free_margin, 2) + ","
+      + "\"daily_pnl\":" + DoubleToString(daily_pnl, 2) + ","
+      + "\"unrealized_pnl\":" + DoubleToString(unrealized, 2) + ","
+      + "\"currency\":\"" + currency + "\","
+      + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
+      + "\"ea_version\":\"1.01\""
+      + "}";
+
+   return json;
 }
 
 //+------------------------------------------------------------------+
@@ -183,7 +258,7 @@ string BuildDealPayload(ulong deal_ticket)
       + "\"magic_number\":" + IntegerToString(magic) + ","
       + "\"comment\":\"" + comment + "\","
       + "\"time\":\"" + TimeToString(time, TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.00\""
+      + "\"ea_version\":\"1.01\""
       + "}";
 
    return json;
@@ -215,7 +290,7 @@ string BuildOrderPayload(ulong order_ticket, const MqlTradeTransaction &trans)
       + "\"magic_number\":0,"
       + "\"comment\":\"\","
       + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.00\""
+      + "\"ea_version\":\"1.01\""
       + "}";
 
    return json;
