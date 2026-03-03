@@ -78,6 +78,23 @@ CREATE TABLE IF NOT EXISTS open_positions (
 
 CREATE INDEX IF NOT EXISTS idx_positions_account ON open_positions(account_id);
 
+CREATE TABLE IF NOT EXISTS open_orders (
+  ticket BIGINT NOT NULL,
+  account_id BIGINT NOT NULL,
+  symbol VARCHAR(32),
+  type VARCHAR(64),
+  volume DECIMAL(10,2),
+  price DECIMAL(16,5),
+  sl DECIMAL(16,5) DEFAULT 0,
+  tp DECIMAL(16,5) DEFAULT 0,
+  order_time TIMESTAMP,
+  magic_number BIGINT DEFAULT 0,
+  comment TEXT,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (ticket, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_open_orders_account ON open_orders(account_id);
+
 -- Indexes for deals
 CREATE INDEX IF NOT EXISTS idx_deals_account_id ON deals(account_id);
 CREATE INDEX IF NOT EXISTS idx_deals_deal_time ON deals(deal_time);

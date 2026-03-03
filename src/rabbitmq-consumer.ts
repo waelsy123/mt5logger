@@ -99,6 +99,9 @@ export class RabbitMQConsumer {
         } else if (routingKey === 'mt5.positions.snapshot') {
           await this.databaseService.storePositions(data.account_id, data.positions || []);
           this.apiServer.broadcastEvent('positions', data);
+        } else if (routingKey === 'mt5.open_orders.snapshot') {
+          await this.databaseService.storeOpenOrders(data.account_id, data.orders || []);
+          this.apiServer.broadcastEvent('open_orders', data);
         } else {
           console.warn(`[Consumer] Unknown routing key: ${routingKey}`);
         }

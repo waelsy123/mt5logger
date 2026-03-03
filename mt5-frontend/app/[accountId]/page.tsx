@@ -78,9 +78,23 @@ interface Stats {
   total_swap: number;
 }
 
+interface OpenOrder {
+  ticket: number;
+  account_id: string;
+  symbol: string;
+  type: string;
+  volume: number;
+  price: number;
+  sl: number;
+  tp: number;
+  order_time: string;
+  magic_number: number;
+  comment: string;
+}
+
 interface WsEvent {
   id: string;
-  type: 'deal' | 'order' | 'account' | 'positions';
+  type: 'deal' | 'order' | 'account' | 'positions' | 'open_orders';
   data: Record<string, unknown>;
   timestamp: number;
 }
@@ -100,7 +114,9 @@ export default function AccountDetailPage() {
   const [snapshots, setSnapshots] = useState<AccountSnapshot[]>([]);
   const [dailyPnl, setDailyPnl] = useState<DailyPnl[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [events, setEvents] = useState<WsEvent[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
   const [symbolFilter, setSymbolFilter] = useState('');
   const [eventTypeFilter, setEventTypeFilter] = useState<string>('all');
   const [loading, setLoading] = useState(true);
@@ -110,13 +126,25 @@ export default function AccountDetailPage() {
 
   const apiUrl = process.env.NEXT_PUBLIC_MT5_API_URL || 'http://localhost:3001';
 
+  const requestRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await fetch(`${apiUrl}/accounts/${accountId}/request-refresh`, { method: 'POST' });
+    } catch (err) {
+      console.error('Refresh request failed:', err);
+    } finally {
+      setTimeout(() => setRefreshing(false), 2000);
+    }
+  };
+
   const fetchData = async () => {
     try {
-      const [accRes, posRes, dealsRes, ordersRes, snapRes, pnlRes, statsRes] = await Promise.allSettled([
+      const [accRes, posRes, dealsRes, ordersRes, openOrdersRes, snapRes, pnlRes, statsRes] = await Promise.allSettled([
         fetch(`${apiUrl}/accounts/${accountId}`),
         fetch(`${apiUrl}/accounts/${accountId}/positions`),
         fetch(`${apiUrl}/accounts/${accountId}/deals?limit=100`),
         fetch(`${apiUrl}/accounts/${accountId}/orders?limit=100`),
+        fetch(`${apiUrl}/accounts/${accountId}/open-orders`),
         fetch(`${apiUrl}/accounts/${accountId}/snapshots?since=${new Date(Date.now() - 7 * 86400000).toISOString()}`),
         fetch(`${apiUrl}/accounts/${accountId}/daily-pnl?days=30`),
         fetch(`${apiUrl}/accounts/${accountId}/stats`),
@@ -140,6 +168,9 @@ export default function AccountDetailPage() {
 
       const ordersData = await parseJson(ordersRes);
       if (ordersData?.orders) setOrders(ordersData.orders);
+
+      const openOrdersData = await parseJson(openOrdersRes);
+      if (openOrdersData?.orders) setOpenOrders(openOrdersData.orders);
 
       const snapData = await parseJson(snapRes);
       if (snapData?.snapshots) setSnapshots(snapData.snapshots);
@@ -189,6 +220,9 @@ export default function AccountDetailPage() {
         }
         if (msg.type === 'order' && msg.data) {
           setOrders(prev => [msg.data as Order, ...prev].slice(0, 100));
+        }
+        if (msg.type === 'open_orders' && msg.data?.orders) {
+          setOpenOrders(msg.data.orders as OpenOrder[]);
         }
       } catch {}
     };
@@ -473,6 +507,20 @@ export default function AccountDetailPage() {
                 </div>
               )}
             </div>
+            <button
+              onClick={requestRefresh}
+              disabled={refreshing}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                refreshing
+                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  : 'bg-blue-500/10 text-blue-400 ring-1 ring-blue-500/30 hover:bg-blue-500/20'
+              }`}
+            >
+              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {refreshing ? 'Refreshing...' : 'Refresh'}
+            </button>
           </div>
 
           {/* Tab bar */}
@@ -755,7 +803,7 @@ export default function AccountDetailPage() {
         {activeTab === 'events' && (
           <div>
             <div className="flex flex-wrap items-center gap-2 mb-4">
-              {(['all', 'deal', 'order', 'account', 'positions'] as const).map((type) => (
+              {(['all', 'deal', 'order', 'account', 'positions', 'open_orders'] as const).map((type) => (
                 <button
                   key={type}
                   onClick={() => setEventTypeFilter(type)}

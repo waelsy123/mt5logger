@@ -213,6 +213,60 @@ export class DatabaseService {
     }
   }
 
+  async storeOpenOrders(accountId: number, orders: any[]): Promise<void> {
+    if (!this.isConnected) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM open_orders WHERE account_id = $1', [accountId]);
+
+      for (const order of orders) {
+        const orderTime = this.parseEATime(order.time);
+        await client.query(
+          `INSERT INTO open_orders (ticket, account_id, symbol, type, volume, price, sl, tp, order_time, magic_number, comment)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [
+            order.ticket,
+            accountId,
+            order.symbol,
+            order.type,
+            order.volume,
+            order.price,
+            order.sl || 0,
+            order.tp || 0,
+            orderTime,
+            order.magic_number || 0,
+            order.comment || null,
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+      console.log(`[Database] Stored ${orders.length} open orders for account_id=${accountId}`);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('[Database] Failed to store open orders:', error instanceof Error ? error.message : error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getOpenOrders(accountId: number): Promise<any[]> {
+    try {
+      const query = `
+        SELECT * FROM open_orders
+        WHERE account_id = $1
+        ORDER BY order_time DESC
+      `;
+      const result = await this.pool.query(query, [accountId]);
+      return result.rows;
+    } catch (error) {
+      console.error('[Database] Failed to get open orders:', error instanceof Error ? error.message : error);
+      throw error;
+    }
+  }
+
   async getOpenPositions(accountId: number): Promise<any[]> {
     try {
       const query = `
