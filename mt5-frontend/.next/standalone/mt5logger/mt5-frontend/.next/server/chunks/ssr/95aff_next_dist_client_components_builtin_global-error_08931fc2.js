@@ -1,3 +1,0 @@
-module.exports=[3313,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(87541);a.n(d("[project]/mt5logger/mt5-frontend/node_modules/next/dist/client/components/builtin/global-error.js <module evaluation>"))},97900,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(87541);a.n(d("[project]/mt5logger/mt5-frontend/node_modules/next/dist/client/components/builtin/global-error.js"))},70255,a=>{"use strict";a.i(3313);var b=a.i(97900);a.n(b)}];
-
-//# sourceMappingURL=95aff_next_dist_client_components_builtin_global-error_08931fc2.js.map
