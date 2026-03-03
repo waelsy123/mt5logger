@@ -1,0 +1,3 @@
+module.exports=[37928,a=>{"use strict";var b=a.i(73322);function c({children:a}){return(0,b.jsx)("html",{lang:"en",children:(0,b.jsx)("body",{className:"bg-black text-white antialiased",children:a})})}a.s(["default",()=>c,"metadata",0,{title:"MT5 Trading Dashboard",description:"Real-time MetaTrader 5 trading monitoring dashboard"}])}];
+
+//# sourceMappingURL=mt5logger_mt5-frontend_app_layout_tsx_6a628f35._.js.map

@@ -1,72 +1,64 @@
-import { serve } from "@hono/node-server";
-import { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
-import { logger } from "hono/logger";
-import { bearerAuth } from "hono/bearer-auth";
+import dotenv from 'dotenv';
+import { getConfig } from './config.js';
+import { DatabaseService } from './database.js';
+import { RabbitMQPublisher } from './rabbitmq-publisher.js';
+import { RabbitMQConsumer } from './rabbitmq-consumer.js';
+import { ApiServer } from './api-server.js';
 
-const API_KEY = process.env.API_KEY;
-if (!API_KEY) {
-  console.error("FATAL: API_KEY environment variable is required");
-  process.exit(1);
+dotenv.config();
+
+async function main() {
+  console.log('========================================');
+  console.log('  MT5 Trade Logger Service');
+  console.log('========================================\n');
+
+  try {
+    const config = getConfig();
+    console.log('[Config] Loaded configuration');
+    console.log(`[Config] RabbitMQ URL: ${config.rabbitmqUrl.replace(/:[^:]*@/, ':****@')}`);
+    console.log(`[Config] API Port: ${config.port}`);
+    console.log(`[Config] Database Configured: ${!!config.databaseUrl}\n`);
+
+    // Initialize Database
+    const db = new DatabaseService(config.databaseUrl);
+    await db.connect();
+    console.log('[Database] Connected and initialized\n');
+
+    // Initialize RabbitMQ Publisher
+    const publisher = new RabbitMQPublisher(config.rabbitmqUrl);
+    await publisher.connect();
+    console.log('[RabbitMQ Publisher] Connected\n');
+
+    // Initialize API Server
+    const apiServer = new ApiServer(config.port, db, publisher, config.apiKey);
+    const httpServer = apiServer.start();
+    console.log(`[API] Server started on port ${config.port}\n`);
+
+    // Initialize RabbitMQ Consumer
+    const consumer = new RabbitMQConsumer(config.rabbitmqUrl, db, apiServer);
+    await consumer.connect();
+    await consumer.startConsuming();
+    console.log('[RabbitMQ Consumer] Connected and consuming messages\n');
+
+    console.log('[Service] MT5 Trade Logger started successfully\n');
+
+    // Graceful shutdown
+    const shutdown = async () => {
+      console.log('\n[Service] Shutting down gracefully...');
+      await consumer.disconnect();
+      await publisher.disconnect();
+      await apiServer.stop();
+      await db.disconnect();
+      console.log('[Service] Shutdown complete');
+      process.exit(0);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  } catch (error) {
+    console.error('[Service] Fatal error:', error);
+    process.exit(1);
+  }
 }
 
-const PORT = parseInt(process.env.PORT || "3000", 10);
-
-const app = new Hono();
-
-app.use("*", logger());
-
-// Health check — no auth
-app.get("/health", (c) => {
-  return c.json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
-// Webhook — bearer auth required
-app.use("/webhook", bearerAuth({ token: API_KEY }));
-
-app.post("/webhook", async (c) => {
-  try {
-    const payload = await c.req.json();
-
-    if (!payload.event_type) {
-      return c.json({ error: "Missing required field: event_type" }, 400);
-    }
-
-    if (payload.event_type !== "account" && (!payload.ticket || !payload.symbol)) {
-      return c.json(
-        { error: "Missing required fields: ticket, symbol" },
-        400
-      );
-    }
-
-    console.log(
-      JSON.stringify({
-        logged_at: new Date().toISOString(),
-        ...payload,
-      })
-    );
-
-    return c.json({ status: "received", ticket: payload.ticket }, 200);
-  } catch {
-    return c.json({ error: "Invalid JSON payload" }, 400);
-  }
-});
-
-app.notFound((c) => c.json({ error: "Not found" }, 404));
-
-app.onError((err, c) => {
-  if (err instanceof HTTPException) {
-    return err.getResponse();
-  }
-  console.error("Unhandled error:", err.message);
-  return c.json({ error: "Internal server error" }, 500);
-});
-
-const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`MT5 Trade Logger listening on port ${info.port}`);
-});
-
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down...");
-  server.close(() => process.exit(0));
-});
+main();
