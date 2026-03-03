@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                                                  TradeLogger.mq5 |
 //|                                                     waelalmattar |
 //|                                             https://www.mql5.com |
@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright "waelalmattar"
 #property link      "https://www.mql5.com"
-#property version   "1.01"
+#property version   "1.03"
 #property strict
 
 //--- User Inputs
@@ -151,6 +151,9 @@ void OnTimer()
    // --- Account snapshot: balance, equity, daily PnL ---
    string account_json = BuildAccountPayload();
    SendWebhook(account_json);
+
+   // --- Open positions snapshot ---
+   SendPositionsPayload();
 }
 
 //+------------------------------------------------------------------+
@@ -214,7 +217,7 @@ string BuildAccountPayload()
       + "\"unrealized_pnl\":" + DoubleToString(unrealized, 2) + ","
       + "\"currency\":\"" + currency + "\","
       + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.01\""
+      + "\"ea_version\":\"1.03\""
       + "}";
 
    return json;
@@ -238,6 +241,15 @@ string BuildDealPayload(ulong deal_ticket)
    long   position   = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
    datetime time     = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
 
+   // Get SL/TP from the open position (if it still exists)
+   double sl = 0.0;
+   double tp = 0.0;
+   if(position > 0 && PositionSelectByTicket(position))
+   {
+      sl = PositionGetDouble(POSITION_SL);
+      tp = PositionGetDouble(POSITION_TP);
+   }
+
    // Escape special characters in comment
    StringReplace(comment, "\\", "\\\\");
    StringReplace(comment, "\"", "\\\"");
@@ -255,10 +267,12 @@ string BuildDealPayload(ulong deal_ticket)
       + "\"profit\":" + DoubleToString(profit, 2) + ","
       + "\"commission\":" + DoubleToString(commission, 2) + ","
       + "\"swap\":" + DoubleToString(swap, 2) + ","
+      + "\"sl\":" + DoubleToString(sl, 5) + ","
+      + "\"tp\":" + DoubleToString(tp, 5) + ","
       + "\"magic_number\":" + IntegerToString(magic) + ","
       + "\"comment\":\"" + comment + "\","
       + "\"time\":\"" + TimeToString(time, TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.01\""
+      + "\"ea_version\":\"1.03\""
       + "}";
 
    return json;
@@ -273,6 +287,8 @@ string BuildOrderPayload(ulong order_ticket, const MqlTradeTransaction &trans)
    string type_str  = EnumToString(trans.order_type);
    double volume    = trans.volume;
    double price     = trans.price;
+   double sl        = trans.price_sl;
+   double tp        = trans.price_tp;
 
    string json = "{"
       + "\"event_type\":\"order\","
@@ -284,16 +300,81 @@ string BuildOrderPayload(ulong order_ticket, const MqlTradeTransaction &trans)
       + "\"type\":\"" + type_str + "\","
       + "\"volume\":" + DoubleToString(volume, 2) + ","
       + "\"price\":" + DoubleToString(price, 5) + ","
+      + "\"sl\":" + DoubleToString(sl, 5) + ","
+      + "\"tp\":" + DoubleToString(tp, 5) + ","
       + "\"profit\":0.00,"
       + "\"commission\":0.00,"
       + "\"swap\":0.00,"
       + "\"magic_number\":0,"
       + "\"comment\":\"\","
       + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
-      + "\"ea_version\":\"1.01\""
+      + "\"ea_version\":\"1.03\""
       + "}";
 
    return json;
+}
+
+//+------------------------------------------------------------------+
+//| Send open positions snapshot                                     |
+//+------------------------------------------------------------------+
+void SendPositionsPayload()
+{
+   int total = PositionsTotal();
+
+   string json = "{"
+      + "\"event_type\":\"positions\","
+      + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+      + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
+      + "\"ea_version\":\"1.03\","
+      + "\"positions\":[";
+
+   bool first = true;
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(InpMagicNumber != 0 && PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      if(!first) json += ",";
+      first = false;
+
+      string symbol      = PositionGetString(POSITION_SYMBOL);
+      long   pos_type    = PositionGetInteger(POSITION_TYPE);
+      double volume      = PositionGetDouble(POSITION_VOLUME);
+      double price_open  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double price_cur   = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double sl          = PositionGetDouble(POSITION_SL);
+      double tp          = PositionGetDouble(POSITION_TP);
+      double profit      = PositionGetDouble(POSITION_PROFIT);
+      double swap        = PositionGetDouble(POSITION_SWAP);
+      datetime pos_time  = (datetime)PositionGetInteger(POSITION_TIME);
+      long   magic       = PositionGetInteger(POSITION_MAGIC);
+
+      string type_str = (pos_type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+      json += "{"
+         + "\"ticket\":" + IntegerToString(ticket) + ","
+         + "\"symbol\":\"" + symbol + "\","
+         + "\"type\":\"" + type_str + "\","
+         + "\"volume\":" + DoubleToString(volume, 2) + ","
+         + "\"price_open\":" + DoubleToString(price_open, 5) + ","
+         + "\"price_current\":" + DoubleToString(price_cur, 5) + ","
+         + "\"sl\":" + DoubleToString(sl, 5) + ","
+         + "\"tp\":" + DoubleToString(tp, 5) + ","
+         + "\"profit\":" + DoubleToString(profit, 2) + ","
+         + "\"swap\":" + DoubleToString(swap, 2) + ","
+         + "\"time\":\"" + TimeToString(pos_time, TIME_DATE | TIME_SECONDS) + "\","
+         + "\"magic_number\":" + IntegerToString(magic)
+         + "}";
+   }
+
+   json += "]}";
+
+   SendWebhook(json);
+   Print("TradeLogger: Sent positions snapshot (", total, " positions)");
 }
 
 //+------------------------------------------------------------------+
