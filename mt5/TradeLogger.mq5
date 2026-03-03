@@ -1,0 +1,299 @@
+//+------------------------------------------------------------------+
+//|                                                  TradeLogger.mq5 |
+//|                                              MT5 Trade Logger EA |
+//|                                                                  |
+//| Monitors all trades and orders on the account and sends them     |
+//| as HTTP webhooks to your logging service.                        |
+//|                                                                  |
+//| SETUP:                                                           |
+//| 1. Tools > Options > Expert Advisors                             |
+//|    - Check "Allow WebRequest for listed URL"                     |
+//|    - Add your Railway URL (e.g. https://your-app.railway.app)    |
+//| 2. Drag this EA onto any chart                                   |
+//| 3. Set WebhookUrl and ApiKey in the Inputs tab                   |
+//| 4. Enable "Allow Algo Trading" in MT5 toolbar                    |
+//+------------------------------------------------------------------+
+#property copyright "MT5 Trade Logger"
+#property version   "1.00"
+#property strict
+
+//--- User Inputs
+input string InpWebhookUrl    = "";     // Webhook URL (e.g. https://your-app.railway.app/webhook)
+input string InpApiKey         = "";     // API Key for authentication
+input int    InpMagicNumber    = 0;      // Magic number filter (0 = log all)
+input int    InpTimerSeconds   = 30;     // Fallback polling interval (seconds)
+input int    InpRequestTimeout = 5000;   // HTTP request timeout (ms)
+
+//--- Deduplication
+#define MAX_SENT_TICKETS 1000
+#define PRUNE_COUNT       500
+
+ulong    g_sent_deal_tickets[];
+int      g_sent_deal_count = 0;
+
+ulong    g_sent_order_tickets[];
+int      g_sent_order_count = 0;
+
+datetime g_last_history_check = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   if(InpWebhookUrl == "" || InpApiKey == "")
+   {
+      Alert("TradeLogger: Webhook URL and API Key are required!");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   ArrayResize(g_sent_deal_tickets, MAX_SENT_TICKETS);
+   ArrayResize(g_sent_order_tickets, MAX_SENT_TICKETS);
+
+   EventSetTimer(InpTimerSeconds);
+
+   g_last_history_check = TimeCurrent();
+
+   Print("TradeLogger: Initialized. URL=", InpWebhookUrl);
+   Print("TradeLogger: Magic filter=", InpMagicNumber, " (0=all)");
+   Print("TradeLogger: Timer interval=", InpTimerSeconds, "s");
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   Print("TradeLogger: Deinitialized. Reason=", reason);
+}
+
+//+------------------------------------------------------------------+
+//| Trade transaction handler — primary event detection              |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(!HistoryDealSelect(trans.deal))
+         return;
+
+      ulong deal_ticket = trans.deal;
+
+      long magic = HistoryDealGetInteger(deal_ticket, DEAL_MAGIC);
+      if(InpMagicNumber != 0 && magic != InpMagicNumber)
+         return;
+
+      if(IsTicketSent(g_sent_deal_tickets, g_sent_deal_count, deal_ticket))
+         return;
+
+      string json = BuildDealPayload(deal_ticket);
+      Print("TradeLogger: New deal #", deal_ticket, " — sending webhook");
+
+      if(SendWebhook(json))
+         AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
+   }
+   else if(trans.type == TRADE_TRANSACTION_ORDER_ADD)
+   {
+      ulong order_ticket = trans.order;
+
+      if(IsTicketSent(g_sent_order_tickets, g_sent_order_count, order_ticket))
+         return;
+
+      string json = BuildOrderPayload(order_ticket, trans);
+      Print("TradeLogger: New order #", order_ticket, " — sending webhook");
+
+      if(SendWebhook(json))
+         AddSentTicket(g_sent_order_tickets, g_sent_order_count, order_ticket);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Timer handler — fallback polling for missed events               |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   datetime now = TimeCurrent();
+
+   if(!HistorySelect(g_last_history_check, now))
+      return;
+
+   int total_deals = HistoryDealsTotal();
+   for(int i = 0; i < total_deals; i++)
+   {
+      ulong deal_ticket = HistoryDealGetTicket(i);
+      if(deal_ticket == 0)
+         continue;
+
+      long magic = HistoryDealGetInteger(deal_ticket, DEAL_MAGIC);
+      if(InpMagicNumber != 0 && magic != InpMagicNumber)
+         continue;
+
+      if(IsTicketSent(g_sent_deal_tickets, g_sent_deal_count, deal_ticket))
+         continue;
+
+      string json = BuildDealPayload(deal_ticket);
+      Print("TradeLogger: [Timer] Missed deal #", deal_ticket, " — sending webhook");
+
+      if(SendWebhook(json))
+         AddSentTicket(g_sent_deal_tickets, g_sent_deal_count, deal_ticket);
+   }
+
+   g_last_history_check = now;
+}
+
+//+------------------------------------------------------------------+
+//| Build JSON payload for a deal                                    |
+//+------------------------------------------------------------------+
+string BuildDealPayload(ulong deal_ticket)
+{
+   string symbol     = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+   long   deal_type  = HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
+   double volume     = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+   double price      = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+   double profit     = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
+   double commission = HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
+   double swap       = HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+   long   magic      = HistoryDealGetInteger(deal_ticket, DEAL_MAGIC);
+   string comment    = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
+   long   order      = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
+   long   position   = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
+   datetime time     = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+
+   // Escape special characters in comment
+   StringReplace(comment, "\\", "\\\\");
+   StringReplace(comment, "\"", "\\\"");
+
+   string json = "{"
+      + "\"event_type\":\"deal\","
+      + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+      + "\"ticket\":" + IntegerToString(deal_ticket) + ","
+      + "\"order_ticket\":" + IntegerToString(order) + ","
+      + "\"position_ticket\":" + IntegerToString(position) + ","
+      + "\"symbol\":\"" + symbol + "\","
+      + "\"type\":\"" + EnumToString((ENUM_DEAL_TYPE)deal_type) + "\","
+      + "\"volume\":" + DoubleToString(volume, 2) + ","
+      + "\"price\":" + DoubleToString(price, 5) + ","
+      + "\"profit\":" + DoubleToString(profit, 2) + ","
+      + "\"commission\":" + DoubleToString(commission, 2) + ","
+      + "\"swap\":" + DoubleToString(swap, 2) + ","
+      + "\"magic_number\":" + IntegerToString(magic) + ","
+      + "\"comment\":\"" + comment + "\","
+      + "\"time\":\"" + TimeToString(time, TIME_DATE | TIME_SECONDS) + "\","
+      + "\"ea_version\":\"1.00\""
+      + "}";
+
+   return json;
+}
+
+//+------------------------------------------------------------------+
+//| Build JSON payload for an order                                  |
+//+------------------------------------------------------------------+
+string BuildOrderPayload(ulong order_ticket, const MqlTradeTransaction &trans)
+{
+   string symbol    = trans.symbol;
+   string type_str  = EnumToString(trans.order_type);
+   double volume    = trans.volume;
+   double price     = trans.price;
+
+   string json = "{"
+      + "\"event_type\":\"order\","
+      + "\"account_id\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+      + "\"ticket\":" + IntegerToString(order_ticket) + ","
+      + "\"order_ticket\":" + IntegerToString(order_ticket) + ","
+      + "\"position_ticket\":0,"
+      + "\"symbol\":\"" + symbol + "\","
+      + "\"type\":\"" + type_str + "\","
+      + "\"volume\":" + DoubleToString(volume, 2) + ","
+      + "\"price\":" + DoubleToString(price, 5) + ","
+      + "\"profit\":0.00,"
+      + "\"commission\":0.00,"
+      + "\"swap\":0.00,"
+      + "\"magic_number\":0,"
+      + "\"comment\":\"\","
+      + "\"time\":\"" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\","
+      + "\"ea_version\":\"1.00\""
+      + "}";
+
+   return json;
+}
+
+//+------------------------------------------------------------------+
+//| Send webhook via HTTP POST                                       |
+//+------------------------------------------------------------------+
+bool SendWebhook(string json)
+{
+   char   post_data[];
+   char   result_data[];
+   string result_headers;
+
+   StringToCharArray(json, post_data, 0, WHOLE_ARRAY, CP_UTF8);
+   // Remove null terminator added by StringToCharArray
+   ArrayResize(post_data, ArraySize(post_data) - 1);
+
+   string headers = "Content-Type: application/json\r\n"
+                  + "Authorization: Bearer " + InpApiKey + "\r\n";
+
+   ResetLastError();
+   int response_code = WebRequest(
+      "POST",
+      InpWebhookUrl,
+      headers,
+      InpRequestTimeout,
+      post_data,
+      result_data,
+      result_headers
+   );
+
+   if(response_code == -1)
+   {
+      int error = GetLastError();
+      Print("TradeLogger: WebRequest failed. Error=", error);
+      Print("TradeLogger: Ensure URL is allowed in Tools > Options > Expert Advisors");
+      return false;
+   }
+
+   if(response_code == 200)
+   {
+      Print("TradeLogger: Webhook sent successfully");
+      return true;
+   }
+
+   string response_body = CharArrayToString(result_data, 0, WHOLE_ARRAY, CP_UTF8);
+   Print("TradeLogger: Webhook returned HTTP ", response_code, ": ", response_body);
+
+   if(response_code == 401)
+      Alert("TradeLogger: API key rejected by server! Check InpApiKey.");
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if ticket was already sent                                 |
+//+------------------------------------------------------------------+
+bool IsTicketSent(const ulong &tickets[], int count, ulong ticket)
+{
+   for(int i = 0; i < count; i++)
+      if(tickets[i] == ticket)
+         return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Add ticket to sent list with FIFO pruning                        |
+//+------------------------------------------------------------------+
+void AddSentTicket(ulong &tickets[], int &count, ulong ticket)
+{
+   if(count >= MAX_SENT_TICKETS)
+   {
+      for(int i = 0; i < count - PRUNE_COUNT; i++)
+         tickets[i] = tickets[i + PRUNE_COUNT];
+      count -= PRUNE_COUNT;
+   }
+   tickets[count] = ticket;
+   count++;
+}
+//+------------------------------------------------------------------+

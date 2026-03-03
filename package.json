@@ -1,0 +1,21 @@
+{
+  "name": "mt5-trade-logger",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "HTTP webhook receiver for MT5 trade logging",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.8.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
