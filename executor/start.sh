@@ -3,6 +3,9 @@ set -e
 
 echo "[Executor] Starting up..."
 
+# Clean stale Xvfb lock files from previous runs
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+
 # Start virtual framebuffer
 echo "[Executor] Starting Xvfb on display :99..."
 Xvfb :99 -screen 0 1024x768x16 &
