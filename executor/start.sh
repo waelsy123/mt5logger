@@ -20,6 +20,13 @@ wait_wine() {
 
 echo "[Executor] Wine version: $(wine --version 2>&1)"
 
+# Ensure /dev/urandom is accessible in Wine prefix (needed for Python)
+# Wine 10+ needs this for Python's hash randomization init
+mkdir -p "$WINEPREFIX/dosdevices"
+if [ ! -e "$WINEPREFIX/dosdevices/z:" ]; then
+    ln -sf / "$WINEPREFIX/dosdevices/z:" 2>/dev/null || true
+fi
+
 # Initialize Wine prefix if not already done
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     echo "[Executor] Initializing Wine prefix..."
@@ -73,7 +80,7 @@ if [ ! -f "$WINE_PYTHON" ]; then
     echo "[Executor] Installing pip..."
     wget -q -O /tmp/get-pip.py "https://bootstrap.pypa.io/get-pip.py"
     set +e
-    wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location 2>&1
+    PYTHONHASHSEED=0 wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location 2>&1
     PIP_EXIT=$?
     set -e
     wait_wine
@@ -82,7 +89,7 @@ if [ ! -f "$WINE_PYTHON" ]; then
 
     echo "[Executor] Installing MetaTrader5 + rpyc..."
     set +e
-    wine "$WINE_PYTHON" -m pip install --no-cache-dir MetaTrader5 "rpyc==5.3.1" --no-warn-script-location 2>&1
+    PYTHONHASHSEED=0 wine "$WINE_PYTHON" -m pip install --no-cache-dir MetaTrader5 "rpyc==5.3.1" --no-warn-script-location 2>&1
     PIP2_EXIT=$?
     set -e
     wait_wine
@@ -115,7 +122,7 @@ print('[Executor] Wrote common.ini with server config')
 
 # ── Start MT5 terminal ────────────────────────────────────────────────
 
-echo "[Executor] Starting MT5 terminal (unpatched - stays alive on Wine 8.0)..."
+echo "[Executor] Starting MT5 terminal..."
 wine "$MT5_PATH" \
     /login:${MT5_LOGIN} \
     /password:${MT5_PASSWORD} \
@@ -154,7 +161,7 @@ ls -la "$MT5_DIR/Config/" 2>/dev/null
 # ── Start RPyC bridge ────────────────────────────────────────────────
 
 echo "[Executor] Starting RPyC bridge server on port 18812..."
-wine "$WINE_PYTHON" -c "
+PYTHONHASHSEED=0 wine "$WINE_PYTHON" -c "
 from rpyc.utils.server import ThreadedServer
 from rpyc.utils.classic import SlaveService
 
@@ -170,7 +177,7 @@ sleep 5
 # ── Diagnostic: Try IPC directly from Wine Python ────────────────────
 echo "[Executor] Testing MetaTrader5 IPC from Wine Python..."
 set +e
-wine "$WINE_PYTHON" -c "
+PYTHONHASHSEED=0 wine "$WINE_PYTHON" -c "
 import MetaTrader5 as mt5
 print('[Test] MT5 module version:', mt5.__version__)
 print('[Test] Attempting initialize()...')
