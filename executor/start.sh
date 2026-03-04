@@ -27,23 +27,6 @@ if [ ! -f "$WINEPREFIX/system.reg" ]; then
     wineboot --init 2>&1
     wait_wine
     echo "[Executor] Wine prefix initialized."
-
-    # Set Windows version to Windows 11 (per official MT5 Linux script)
-    echo "[Executor] Setting Wine to Windows 11 mode..."
-    winecfg -v=win11 2>&1
-    wait_wine
-fi
-
-# Install WebView2 Runtime (required by modern MT5 builds)
-if [ ! -d "$WINEPREFIX/drive_c/Program Files/Microsoft/EdgeWebView" ]; then
-    echo "[Executor] Installing WebView2 Runtime..."
-    wget -q -O /tmp/webview2.exe "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/f2910a1e-e5a6-4f17-b52d-7faf525d17f8/MicrosoftEdgeWebview2Setup.exe"
-    set +e
-    wine /tmp/webview2.exe /silent /install 2>&1
-    echo "[Executor] WebView2 installer exit: $?"
-    set -e
-    wait_wine
-    rm -f /tmp/webview2.exe
 fi
 
 # Install MT5 via Wine installer (works at runtime, not at build time)
@@ -68,6 +51,33 @@ if [ -z "$MT5_PATH" ]; then
 fi
 
 echo "[Executor] MT5 terminal: $MT5_PATH"
+MT5_DIR=$(dirname "$MT5_PATH")
+
+# ── Patch MT5 binary to hide Wine detection ───────────────────────────
+# MT5 build 5663 detects Wine via wine_get_version/wine_get_build_id exports
+# and refuses to connect to servers on Wine < 10.0. Patching the binary
+# strings makes MT5 unable to detect Wine, so it runs as if on Windows.
+echo "[Executor] Checking MT5 binary for Wine detection strings..."
+if grep -qP 'wine_' "$MT5_PATH" 2>/dev/null; then
+    echo "[Executor] Patching terminal64.exe to hide Wine detection..."
+    cp "$MT5_PATH" "${MT5_PATH}.orig"
+    sed -i 's/wine_get_version/xine_get_version/g' "$MT5_PATH"
+    sed -i 's/wine_get_build_id/xine_get_build_id/g' "$MT5_PATH"
+    sed -i 's/wine_get_host_version/xine_get_host_version/g' "$MT5_PATH"
+    echo "[Executor] Binary patched."
+else
+    echo "[Executor] No Wine detection strings found (already patched or not present)."
+fi
+
+# Also patch metatester and metaeditor if present
+for EXTRA_BIN in "$MT5_DIR/metatester64.exe" "$MT5_DIR/metaeditor64.exe"; do
+    if [ -f "$EXTRA_BIN" ] && grep -qP 'wine_' "$EXTRA_BIN" 2>/dev/null; then
+        sed -i 's/wine_get_version/xine_get_version/g' "$EXTRA_BIN"
+        sed -i 's/wine_get_build_id/xine_get_build_id/g' "$EXTRA_BIN"
+        sed -i 's/wine_get_host_version/xine_get_host_version/g' "$EXTRA_BIN"
+        echo "[Executor] Patched $(basename $EXTRA_BIN)"
+    fi
+done
 
 # Install Wine Python via embedded zip (MSI installer doesn't work reliably in Wine)
 PYDIR="$WINEPREFIX/drive_c/Python39"
@@ -113,8 +123,6 @@ echo "[Executor] Wine Python: $WINE_PYTHON"
 
 # ── Configure broker server ───────────────────────────────────────────
 
-MT5_DIR=$(dirname "$MT5_PATH")
-
 # Write server config so MT5 knows how to connect to the broker
 echo "[Executor] Configuring MT5 for server: ${MT5_SERVER}, login: ${MT5_LOGIN}"
 mkdir -p "$MT5_DIR/Config"
@@ -158,8 +166,8 @@ fi
 # Check terminal journal for connection status
 LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
 if [ -f "$LOGFILE" ]; then
-    echo "[Executor] MT5 journal (last 20 lines):"
-    cat "$LOGFILE" | tr -d '\0' | tail -20
+    echo "[Executor] MT5 journal (last 30 lines):"
+    cat "$LOGFILE" | tr -d '\0' | tail -30
 fi
 
 # Dump network connections to see if MT5 connected to broker
