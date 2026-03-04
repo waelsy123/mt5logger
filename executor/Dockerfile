@@ -1,13 +1,13 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV WINEDEBUG=-all
 ENV WINEPREFIX=/root/.wine
 
-# Install Wine 8.0 from Debian repos (only version that works on Railway).
-# WineHQ Wine 10+/11+ fails with kernel32.dll in Railway's container runtime.
-# Wine 8.0 can run executables; we patch MT5 binary to bypass Wine version check.
+# Install Wine 10.0 from Debian Trixie repos.
+# MT5 build 5663 requires Wine 10.0+.
+# Debian Trixie ships Wine 10.0 natively (packages compiled for Debian).
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
