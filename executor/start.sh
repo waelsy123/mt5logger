@@ -66,41 +66,56 @@ fi
 echo "[Executor] MT5 terminal: $MT5_PATH"
 MT5_DIR=$(dirname "$MT5_PATH")
 
-# ── Phase 1: First launch to let MT5 auto-update ─────────────────────
-# MT5 auto-updates on first launch, then exits. We patch, let it update,
-# re-patch the updated binary, and relaunch.
+# ── Auto-update + patch loop ──────────────────────────────────────────
+# MT5 auto-updates on first launch and exits (code 10056 = restart needed).
+# We run it in a loop: patch -> launch -> wait for exit -> re-patch -> repeat
+# until the terminal stays running (meaning auto-updates are done).
 
-patch_mt5_binaries "$MT5_DIR"
+for ATTEMPT in 1 2 3 4 5; do
+    patch_mt5_binaries "$MT5_DIR"
 
-echo "[Executor] Phase 1: Starting MT5 for auto-update..."
-set +e
-wine "$MT5_PATH" /portable &
-MT5_PID=$!
+    echo "[Executor] Launch $ATTEMPT: Starting MT5 terminal..."
+    set +e
+    wine "$MT5_PATH" /portable &
 
-# Wait up to 120s for terminal to exit (auto-update cycle)
-WAITED=0
-while kill -0 $MT5_PID 2>/dev/null && [ $WAITED -lt 120 ]; do
-    sleep 5
-    WAITED=$((WAITED + 5))
-    # Check if terminal process (not just wine wrapper) is still alive
-    if ! pgrep -f terminal64.exe > /dev/null 2>&1; then
-        echo "[Executor] Phase 1: Terminal process exited after ${WAITED}s"
+    # Wait up to 60s for this launch cycle
+    STAYED=false
+    for i in $(seq 1 12); do
+        sleep 5
+        if ! pgrep -f terminal64.exe > /dev/null 2>&1; then
+            echo "[Executor] Launch $ATTEMPT: Terminal exited after $((i * 5))s"
+            break
+        fi
+        if [ $i -eq 12 ]; then
+            echo "[Executor] Launch $ATTEMPT: Terminal stayed alive for 60s - update cycle complete"
+            STAYED=true
+        fi
+    done
+    set -e
+    wait_wine
+
+    LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
+    if [ -f "$LOGFILE" ]; then
+        echo "[Executor] Launch $ATTEMPT journal (last 10 lines):"
+        cat "$LOGFILE" | tr -d '\0' | tail -10
+    fi
+
+    if [ "$STAYED" = true ]; then
+        echo "[Executor] Terminal is running after launch $ATTEMPT"
         break
     fi
+
+    echo "[Executor] Terminal exited (likely auto-update restart). Retrying..."
+    sleep 3
 done
-set -e
-wait_wine
 
-# Log what happened in phase 1
-LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
-if [ -f "$LOGFILE" ]; then
-    echo "[Executor] Phase 1 journal:"
-    cat "$LOGFILE" | tr -d '\0' | tail -15
-fi
-
-# Re-patch after auto-update (update replaces binaries)
-echo "[Executor] Re-patching after auto-update..."
+# Final re-patch in case the last update replaced the binary
 patch_mt5_binaries "$MT5_DIR"
+
+# Kill any leftover terminal from the update loop (we'll start fresh with credentials)
+pkill -f terminal64.exe 2>/dev/null || true
+wait_wine
+sleep 2
 
 # Install Wine Python via embedded zip
 PYDIR="$WINEPREFIX/drive_c/Python39"
