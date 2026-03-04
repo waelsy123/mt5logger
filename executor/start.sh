@@ -16,9 +16,22 @@ wait_wine() {
     while pgrep -x wineserver > /dev/null 2>&1; do sleep 1; done
 }
 
+# Helper: patch MT5 binaries to hide Wine detection
+patch_mt5_binaries() {
+    local mt5dir="$1"
+    local mt5exe="$mt5dir/terminal64.exe"
+    for BIN in "$mt5exe" "$mt5dir/metatester64.exe" "$mt5dir/metaeditor64.exe"; do
+        if [ -f "$BIN" ] && grep -q 'wine_get_version' "$BIN" 2>/dev/null; then
+            echo "[Executor] Patching $(basename "$BIN") to hide Wine detection..."
+            sed -i 's/wine_get_version/xine_get_version/g' "$BIN"
+            sed -i 's/wine_get_build_id/xine_get_build_id/g' "$BIN"
+            sed -i 's/wine_get_host_version/xine_get_host_version/g' "$BIN"
+        fi
+    done
+}
+
 # ── Wine + MT5 runtime setup ──────────────────────────────────────────
 
-# Report Wine version
 echo "[Executor] Wine version: $(wine --version 2>&1)"
 
 # Initialize Wine prefix if not already done
@@ -53,33 +66,43 @@ fi
 echo "[Executor] MT5 terminal: $MT5_PATH"
 MT5_DIR=$(dirname "$MT5_PATH")
 
-# ── Patch MT5 binary to hide Wine detection ───────────────────────────
-# MT5 build 5663 detects Wine via wine_get_version/wine_get_build_id exports
-# and refuses to connect to servers on Wine < 10.0. Patching the binary
-# strings makes MT5 unable to detect Wine, so it runs as if on Windows.
-echo "[Executor] Checking MT5 binary for Wine detection strings..."
-if grep -qP 'wine_' "$MT5_PATH" 2>/dev/null; then
-    echo "[Executor] Patching terminal64.exe to hide Wine detection..."
-    cp "$MT5_PATH" "${MT5_PATH}.orig"
-    sed -i 's/wine_get_version/xine_get_version/g' "$MT5_PATH"
-    sed -i 's/wine_get_build_id/xine_get_build_id/g' "$MT5_PATH"
-    sed -i 's/wine_get_host_version/xine_get_host_version/g' "$MT5_PATH"
-    echo "[Executor] Binary patched."
-else
-    echo "[Executor] No Wine detection strings found (already patched or not present)."
-fi
+# ── Phase 1: First launch to let MT5 auto-update ─────────────────────
+# MT5 auto-updates on first launch, then exits. We patch, let it update,
+# re-patch the updated binary, and relaunch.
 
-# Also patch metatester and metaeditor if present
-for EXTRA_BIN in "$MT5_DIR/metatester64.exe" "$MT5_DIR/metaeditor64.exe"; do
-    if [ -f "$EXTRA_BIN" ] && grep -qP 'wine_' "$EXTRA_BIN" 2>/dev/null; then
-        sed -i 's/wine_get_version/xine_get_version/g' "$EXTRA_BIN"
-        sed -i 's/wine_get_build_id/xine_get_build_id/g' "$EXTRA_BIN"
-        sed -i 's/wine_get_host_version/xine_get_host_version/g' "$EXTRA_BIN"
-        echo "[Executor] Patched $(basename $EXTRA_BIN)"
+patch_mt5_binaries "$MT5_DIR"
+
+echo "[Executor] Phase 1: Starting MT5 for auto-update..."
+set +e
+wine "$MT5_PATH" /portable &
+MT5_PID=$!
+
+# Wait up to 120s for terminal to exit (auto-update cycle)
+WAITED=0
+while kill -0 $MT5_PID 2>/dev/null && [ $WAITED -lt 120 ]; do
+    sleep 5
+    WAITED=$((WAITED + 5))
+    # Check if terminal process (not just wine wrapper) is still alive
+    if ! pgrep -f terminal64.exe > /dev/null 2>&1; then
+        echo "[Executor] Phase 1: Terminal process exited after ${WAITED}s"
+        break
     fi
 done
+set -e
+wait_wine
 
-# Install Wine Python via embedded zip (MSI installer doesn't work reliably in Wine)
+# Log what happened in phase 1
+LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
+if [ -f "$LOGFILE" ]; then
+    echo "[Executor] Phase 1 journal:"
+    cat "$LOGFILE" | tr -d '\0' | tail -15
+fi
+
+# Re-patch after auto-update (update replaces binaries)
+echo "[Executor] Re-patching after auto-update..."
+patch_mt5_binaries "$MT5_DIR"
+
+# Install Wine Python via embedded zip
 PYDIR="$WINEPREFIX/drive_c/Python39"
 WINE_PYTHON="$PYDIR/python.exe"
 
@@ -90,7 +113,6 @@ if [ ! -f "$WINE_PYTHON" ]; then
     unzip -o /tmp/python-embed.zip -d "$PYDIR" > /dev/null 2>&1
     rm -f /tmp/python-embed.zip
 
-    # Enable pip: uncomment 'import site' in ._pth file and add site-packages
     PTH_FILE=$(ls "$PYDIR"/python*._pth 2>/dev/null | head -1)
     if [ -n "$PTH_FILE" ]; then
         sed -i 's/^#import site/import site/' "$PTH_FILE"
@@ -98,7 +120,6 @@ if [ ! -f "$WINE_PYTHON" ]; then
     fi
     mkdir -p "$PYDIR/Lib/site-packages"
 
-    # Install pip via get-pip.py
     echo "[Executor] Installing pip..."
     wget -q -O /tmp/get-pip.py "https://bootstrap.pypa.io/get-pip.py"
     set +e
@@ -109,7 +130,6 @@ if [ ! -f "$WINE_PYTHON" ]; then
     rm -f /tmp/get-pip.py
     echo "[Executor] get-pip.py exit code: $PIP_EXIT"
 
-    # Install MetaTrader5 and rpyc
     echo "[Executor] Installing MetaTrader5 + rpyc..."
     set +e
     wine "$WINE_PYTHON" -m pip install --no-cache-dir MetaTrader5 "rpyc==5.3.1" --no-warn-script-location 2>&1
@@ -123,7 +143,6 @@ echo "[Executor] Wine Python: $WINE_PYTHON"
 
 # ── Configure broker server ───────────────────────────────────────────
 
-# Write server config so MT5 knows how to connect to the broker
 echo "[Executor] Configuring MT5 for server: ${MT5_SERVER}, login: ${MT5_LOGIN}"
 mkdir -p "$MT5_DIR/Config"
 python3 -c "
@@ -144,16 +163,16 @@ with open(common_path, 'wb') as f:
 print('[Executor] Wrote common.ini with server config')
 "
 
-# ── Start services ────────────────────────────────────────────────────
+# ── Phase 2: Production launch ───────────────────────────────────────
 
-echo "[Executor] Starting MT5 terminal..."
+echo "[Executor] Phase 2: Starting MT5 terminal for production..."
 wine "$MT5_PATH" \
     /login:${MT5_LOGIN} \
     /password:${MT5_PASSWORD} \
     /server:${MT5_SERVER} \
     /portable &
 
-echo "[Executor] Waiting for MT5 to initialize (90s)..."
+echo "[Executor] Waiting for MT5 to connect (90s)..."
 sleep 90
 
 # Verify terminal is still running
@@ -163,20 +182,21 @@ else
     echo "[Executor] WARNING: MT5 terminal process not found!"
 fi
 
-# Check terminal journal for connection status
+# Check terminal journal
 LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
 if [ -f "$LOGFILE" ]; then
     echo "[Executor] MT5 journal (last 30 lines):"
     cat "$LOGFILE" | tr -d '\0' | tail -30
 fi
 
-# Dump network connections to see if MT5 connected to broker
+# Show network connections
 echo "[Executor] Active connections:"
 ss -tn 2>/dev/null || netstat -tn 2>/dev/null || true
 
 # List server config files
 echo "[Executor] Server config files:"
 find "$MT5_DIR" -name "servers.dat" -o -name "*.srv" -o -name "common.ini" 2>/dev/null
+ls -la "$MT5_DIR/Config/" 2>/dev/null
 
 echo "[Executor] Starting RPyC bridge server on port 18812..."
 wine "$WINE_PYTHON" -c "
