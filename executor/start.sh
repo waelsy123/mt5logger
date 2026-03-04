@@ -20,19 +20,18 @@ wait_wine() {
 
 echo "[Executor] Wine version: $(wine --version 2>&1)"
 
-# Ensure /dev/urandom is accessible in Wine prefix (needed for Python)
-# Wine 10+ needs this for Python's hash randomization init
-mkdir -p "$WINEPREFIX/dosdevices"
-if [ ! -e "$WINEPREFIX/dosdevices/z:" ]; then
-    ln -sf / "$WINEPREFIX/dosdevices/z:" 2>/dev/null || true
-fi
-
 # Initialize Wine prefix if not already done
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     echo "[Executor] Initializing Wine prefix..."
     wineboot --init 2>&1
     wait_wine
     echo "[Executor] Wine prefix initialized."
+fi
+
+# Ensure /dev/urandom is accessible in Wine prefix (needed for Python)
+# Must be done AFTER wineboot creates the dosdevices directory
+if [ ! -e "$WINEPREFIX/dosdevices/z:" ]; then
+    ln -sf / "$WINEPREFIX/dosdevices/z:" 2>/dev/null || true
 fi
 
 # Install MT5 via Wine installer (works at runtime, not at build time)
