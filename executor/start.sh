@@ -16,20 +16,6 @@ wait_wine() {
     while pgrep -x wineserver > /dev/null 2>&1; do sleep 1; done
 }
 
-# Helper: patch MT5 binaries to hide Wine detection
-patch_mt5_binaries() {
-    local mt5dir="$1"
-    local mt5exe="$mt5dir/terminal64.exe"
-    for BIN in "$mt5exe" "$mt5dir/metatester64.exe" "$mt5dir/metaeditor64.exe"; do
-        if [ -f "$BIN" ] && grep -q 'wine_get_version' "$BIN" 2>/dev/null; then
-            echo "[Executor] Patching $(basename "$BIN") to hide Wine detection..."
-            sed -i 's/wine_get_version/xine_get_version/g' "$BIN"
-            sed -i 's/wine_get_build_id/xine_get_build_id/g' "$BIN"
-            sed -i 's/wine_get_host_version/xine_get_host_version/g' "$BIN"
-        fi
-    done
-}
-
 # ── Wine + MT5 runtime setup ──────────────────────────────────────────
 
 echo "[Executor] Wine version: $(wine --version 2>&1)"
@@ -65,57 +51,6 @@ fi
 
 echo "[Executor] MT5 terminal: $MT5_PATH"
 MT5_DIR=$(dirname "$MT5_PATH")
-
-# ── Auto-update + patch loop ──────────────────────────────────────────
-# MT5 auto-updates on first launch and exits (code 10056 = restart needed).
-# We run it in a loop: patch -> launch -> wait for exit -> re-patch -> repeat
-# until the terminal stays running (meaning auto-updates are done).
-
-for ATTEMPT in 1 2 3 4 5; do
-    patch_mt5_binaries "$MT5_DIR"
-
-    echo "[Executor] Launch $ATTEMPT: Starting MT5 terminal..."
-    set +e
-    wine "$MT5_PATH" /portable &
-
-    # Wait up to 60s for this launch cycle
-    STAYED=false
-    for i in $(seq 1 12); do
-        sleep 5
-        if ! pgrep -f terminal64.exe > /dev/null 2>&1; then
-            echo "[Executor] Launch $ATTEMPT: Terminal exited after $((i * 5))s"
-            break
-        fi
-        if [ $i -eq 12 ]; then
-            echo "[Executor] Launch $ATTEMPT: Terminal stayed alive for 60s - update cycle complete"
-            STAYED=true
-        fi
-    done
-    set -e
-    wait_wine
-
-    LOGFILE="$MT5_DIR/logs/$(date -u +%Y%m%d).log"
-    if [ -f "$LOGFILE" ]; then
-        echo "[Executor] Launch $ATTEMPT journal (last 10 lines):"
-        cat "$LOGFILE" | tr -d '\0' | tail -10
-    fi
-
-    if [ "$STAYED" = true ]; then
-        echo "[Executor] Terminal is running after launch $ATTEMPT"
-        break
-    fi
-
-    echo "[Executor] Terminal exited (likely auto-update restart). Retrying..."
-    sleep 3
-done
-
-# Final re-patch in case the last update replaced the binary
-patch_mt5_binaries "$MT5_DIR"
-
-# Kill any leftover terminal from the update loop (we'll start fresh with credentials)
-pkill -f terminal64.exe 2>/dev/null || true
-wait_wine
-sleep 2
 
 # Install Wine Python via embedded zip
 PYDIR="$WINEPREFIX/drive_c/Python39"
@@ -178,17 +113,17 @@ with open(common_path, 'wb') as f:
 print('[Executor] Wrote common.ini with server config')
 "
 
-# ── Phase 2: Production launch ───────────────────────────────────────
+# ── Start MT5 terminal ────────────────────────────────────────────────
 
-echo "[Executor] Phase 2: Starting MT5 terminal for production..."
+echo "[Executor] Starting MT5 terminal (unpatched - stays alive on Wine 8.0)..."
 wine "$MT5_PATH" \
     /login:${MT5_LOGIN} \
     /password:${MT5_PASSWORD} \
     /server:${MT5_SERVER} \
     /portable &
 
-echo "[Executor] Waiting for MT5 to connect (90s)..."
-sleep 90
+echo "[Executor] Waiting for MT5 to initialize (120s)..."
+sleep 120
 
 # Verify terminal is still running
 if pgrep -f terminal64.exe > /dev/null 2>&1; then
@@ -204,14 +139,19 @@ if [ -f "$LOGFILE" ]; then
     cat "$LOGFILE" | tr -d '\0' | tail -30
 fi
 
-# Show network connections
+# Show network connections and named pipes
 echo "[Executor] Active connections:"
 ss -tn 2>/dev/null || netstat -tn 2>/dev/null || true
 
-# List server config files
+echo "[Executor] Named pipes (IPC):"
+find "$WINEPREFIX" -path "*/pipe/*" -type f 2>/dev/null || true
+ls -la /tmp/.wine-*/server-*/default/pipe/ 2>/dev/null || true
+
 echo "[Executor] Server config files:"
-find "$MT5_DIR" -name "servers.dat" -o -name "*.srv" -o -name "common.ini" 2>/dev/null
+find "$MT5_DIR/Config" -type f 2>/dev/null
 ls -la "$MT5_DIR/Config/" 2>/dev/null
+
+# ── Start RPyC bridge ────────────────────────────────────────────────
 
 echo "[Executor] Starting RPyC bridge server on port 18812..."
 wine "$WINE_PYTHON" -c "
@@ -226,6 +166,34 @@ t.start()
 
 echo "[Executor] Waiting for RPyC server (5s)..."
 sleep 5
+
+# ── Diagnostic: Try IPC directly from Wine Python ────────────────────
+echo "[Executor] Testing MetaTrader5 IPC from Wine Python..."
+set +e
+wine "$WINE_PYTHON" -c "
+import MetaTrader5 as mt5
+print('[Test] MT5 module version:', mt5.__version__)
+print('[Test] Attempting initialize()...')
+result = mt5.initialize(
+    path=r'C:\\\\Program Files\\\\MetaTrader 5\\\\terminal64.exe',
+    login=${MT5_LOGIN},
+    password='${MT5_PASSWORD}',
+    server='${MT5_SERVER}',
+    timeout=30000,
+    portable=True,
+)
+print('[Test] initialize() returned:', result)
+if not result:
+    err = mt5.last_error()
+    print('[Test] Error:', err)
+else:
+    info = mt5.account_info()
+    print('[Test] Account info:', info)
+    mt5.shutdown()
+" 2>&1
+IPC_EXIT=$?
+set -e
+echo "[Executor] IPC test exit code: $IPC_EXIT"
 
 echo "[Executor] Starting trade executor..."
 exec python3 /app/trade_executor.py
